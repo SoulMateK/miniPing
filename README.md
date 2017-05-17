@@ -1,7 +1,7 @@
 # miniPing
 简单的实现ping部分功能   
 使用方法：
-> ./myping www.baidu.com   
+> sudo ./myping www.baidu.com   
 > ^C(退出)
 
 结果：
