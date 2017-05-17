@@ -5,6 +5,14 @@
 #include <netinet/in.h> /*unknow*/
 #include <netinet/ip.h> /*unknow*/
 #include <netinet/ip_icmp.h> /*unknow*/
+#include <sys/socket.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <errno.h>
+#include <sys/time.h>
+#include <string.h>
+#include <netdb.h>
+#include <pthread.h>
 #define PACKET_SIZE     4096
 typedef struct ping_packet
 {
@@ -27,16 +35,24 @@ char recvpacket[PACKET_SIZE];
 struct timeval tv_begin, tv_end, tv_interval;
 pid_t pid;
 
+struct timeval icmp_tvsub(struct timeval end, struct timeval begin)
+{
+    struct timeval tv;
+    tv.tv_sec = end.tv_sec - begin.tv_sec;
+    tv.tv_usec = end.tv_usec - begin.tv_usec;
+    if(tv.tv_usec < 0){
+        tv.tv_sec --;
+        tv.tv_usec += 1000000;
+    }
+    // printf("%d\n", tv.tv_sec);
+    return tv;
+}
+
 void signal_handle(int signo)
 {
 	live = 0;
 	gettimeofday(&tv_end,NULL);
-	tv_interval.tv_sec = tv_end.tv_sec - tv_begin.tv_sec;
-	tv_interval.tv_usec = tv_end.tv_usec - tv_begin.tv_usec;
-	if(tv_interval.tv_usec < 0){  
-        tv_interval.tv_sec --;  
-        tv_interval.tv_usec += 1000000;  
-    }
+	tv_interval = icmp_tvsub(tv_end, tv_begin);
 	printf("Bye\n");
 }
 
@@ -48,11 +64,12 @@ void statistics_packets()
         send_num,recv_num,(send_num-recv_num)*100/send_num,'%',time);
 }
 
-ping_pakcet *icmp_findpacket(int seq)
+ping_packet *find_packet(int seq)
 {
     int i;
-    ping_pakcet *found = NULL;
-    if(seq == -1){
+    ping_packet *found = NULL;
+    if(seq == -1)
+    {
         for(i=0;i<128;i++){
             if(pingpacket[i].flag == 0){
                 found = &pingpacket[i];
@@ -60,7 +77,8 @@ ping_pakcet *icmp_findpacket(int seq)
             }
         }
     }
-    else if(seq >= 0){
+    else 
+    {
         for(i =0 ;i< 128;i++){
             if(pingpacket[i].seq == seq){
                 found = &pingpacket[i];
@@ -90,7 +108,7 @@ unsigned short cal_chksum(unsigned short *addr,int len)
     }
     sum = (sum >> 16) + (sum & 0xffff);
     sum += (sum >> 16);
-    answer =~ sum;
+    answer = ~sum;
     return answer;
 }
 
@@ -104,7 +122,7 @@ int pack(int packet_no)
 	icmp->icmp_type = ICMP_ECHO;
     icmp->icmp_code = 0;
     icmp->icmp_cksum = 0;
-    icmp->icmp_seq = pack_no;
+    icmp->icmp_seq = packet_no;
     icmp->icmp_id = pid;
     packsize = 8 + datalen;
     tval = (struct timeval *)icmp->icmp_data;
@@ -113,12 +131,12 @@ int pack(int packet_no)
     return packsize;
 }
 
-int icmp_unpack(char *buf, int len)  
+int unpack(char *buf, int len)  
 {  
     int i,iphdrlen;
     struct ip *ip = NULL;
     struct icmp *icmp = NULL;
-    int rtt;
+    double rtt;
   
     ip = (struct ip *)buf;
     iphdrlen = ip->ip_hl * 4;
@@ -130,20 +148,20 @@ int icmp_unpack(char *buf, int len)
     }
     
     if((icmp->icmp_type == ICMP_ECHOREPLY) && (icmp->icmp_id == pid)){
-        struct timeval tv_interval,tv_recv,tv_send;
+        struct timeval tv_interval, tv_recv, tv_send;
         
-        pingm_pakcet *packet = icmp_findpacket(icmp->icmp_seq);
+        ping_packet *packet = find_packet(icmp->icmp_seq);
         if(packet == NULL)
             return -1;
-        packet->flag = 0;
         tv_send = packet->tv_begin;
   
-        gettimeofday(&tv_recv,NULL);
-        tv_interval = icmp_tvsub(tv_recv,tv_send);
-        rtt = tv_interval.tv_sec * 1000 + tv_interval.tv_usec/1000;
-        printf("%d byte from %s: icmp_seq=%u ttl=%d rtt=%d ms\n", 
+        gettimeofday(&tv_recv, NULL);
+        tv_interval = icmp_tvsub(tv_recv, tv_send);
+        rtt = tv_interval.tv_sec * 1000 + (double)tv_interval.tv_usec/1000;
+        printf("%d byte from %s: icmp_seq=%u ttl=%d rtt=%.2f ms\n", 
             len,inet_ntoa(ip->ip_src),icmp->icmp_seq,ip->ip_ttl,rtt);
-        packet_recv ++;
+        recv_num ++;
+        packet->flag = 0;
     }
     else {
         return -1;
@@ -164,7 +182,7 @@ void *send_icmp(void *param)
 	    	packet->flag = 1;
 	    	gettimeofday(&packet->tv_begin, NULL);
 	    }
-	    size = pack(send_num);
+	    size = pack(send_num + 1);
         if(sendto(sockfd, sendpacket, size, 0, 
         	(struct sockaddr *)&dest, sizeof(dest)) < 0){
             perror("sendto error");
@@ -200,7 +218,7 @@ void *recv_icmp(void *param)
 	    		int fromlen = 0;
 	    		struct sockaddr from;
 	    		int size = recv(sockfd, recvpacket, sizeof(recvpacket), 0);
-	    		if (errno = EINTR)
+	    		if (errno == EINTR)
 	    		{
 	    			perror("recvfrom error");
 	    			continue;
@@ -217,13 +235,17 @@ void *recv_icmp(void *param)
 
 int main(int argc, char const *argv[])
 {
+	struct hostent *host = NULL;
 	struct protoent *protocol;
 	unsigned long inaddr = 1;
+	int size = 128 * PACKET_SIZE;
+
+
 	signal(SIGINT, signal_handle);
 	pid = getpid();
 	if (argc < 2)
 	{
-		printf("ping aaa.bbb.ccc.ddd or DNS address\n", );
+		printf("ping aaa.bbb.ccc.ddd or DNS address\n");
 		return -1;
 	}
 	if ((protocol = getprotobyname("icmp")) == NULL)
@@ -236,7 +258,7 @@ int main(int argc, char const *argv[])
 		perror("socket error");
 		return -1;
 	}
-	setsockopt(sockfd, SOL_SOCKET, SO_RCVBUFF, &size, sizeof(size));
+	setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &size, sizeof(size));
 	memset(&dest, 0, sizeof(dest));
 	dest.sin_family = AF_INET;
 
