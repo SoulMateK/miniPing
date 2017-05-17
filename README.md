@@ -5,4 +5,4 @@
 > ^C(退出)
 
 结果：
-![image](/miniPing/result/result.png)
+![image](https://github.com/SoulMateK/miniPing/blob/master/result/result.png)
