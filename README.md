@@ -6,3 +6,4 @@
 
 结果:   
 ![image](https://github.com/SoulMateK/miniPing/blob/master/result/result.png)
+test
